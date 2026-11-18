@@ -1,0 +1,72 @@
+name: India Revenue Radar
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [probe, monitor]
+        default: probe
+      source:
+        description: Optional single P1 source ID
+        required: false
+  schedule:
+    - cron: '23 */2 * * *'
+      timezone: Asia/Kolkata
+permissions:
+  contents: read
+concurrency:
+  group: india-revenue-radar-private-state
+  cancel-in-progress: false
+jobs:
+  radar:
+    # The manual probe is public/read-only. All stateful runs require the
+    # explicit monitor gate. A scheduled event cannot bypass this gate.
+    if: (github.event_name == 'workflow_dispatch' && inputs.mode == 'probe') || vars.INDIA_RADAR_MONITOR_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout public runner
+        uses: actions/checkout@v4
+        with:
+          path: app
+          persist-credentials: false
+      - name: Check private state access
+        if: inputs.mode == 'monitor' || github.event_name == 'schedule'
+        env:
+          STATE_TOKEN: ${{ secrets.INDIA_STATE_REPO_TOKEN }}
+        run: |
+          if [ -z "$STATE_TOKEN" ]; then
+            echo 'Private state token is not configured' >&2
+            exit 1
+          fi
+      - name: Checkout private state
+        if: inputs.mode == 'monitor' || github.event_name == 'schedule'
+        uses: actions/checkout@v4
+        with:
+          repository: atharvakul003-cpu/india-hotel-revenue-radar
+          ref: radar-state
+          path: state
+          token: ${{ secrets.INDIA_STATE_REPO_TOKEN }}
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check -r app/requirements.txt
+      - name: Check sources
+        working-directory: app
+        env:
+          INDIA_RADAR_STATE_DIR: ${{ github.workspace }}/state
+          INDIA_RADAR_DELIVERY_ENABLED: ${{ vars.INDIA_RADAR_DELIVERY_ENABLED }}
+          INDIA_RADAR_SENDER: ${{ vars.INDIA_RADAR_SENDER }}
+          INDIA_RADAR_RECIPIENT: ${{ vars.INDIA_RADAR_RECIPIENT }}
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          SOURCE_ID: ${{ inputs.source }}
+          RUN_MODE: ${{ inputs.mode || 'monitor' }}
+        run: |
+          if [ -n "$SOURCE_ID" ]; then
+            python -m radar "$RUN_MODE" --source "$SOURCE_ID"
+          else
+            python -m radar "$RUN_MODE"
+          fi
